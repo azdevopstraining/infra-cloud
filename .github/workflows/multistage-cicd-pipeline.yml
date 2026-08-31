@@ -154,12 +154,15 @@ jobs:
   # On merge to main: deploy dev, then staging, then production (one at a time).
   # Manual run can target a single environment.
   # OIDC subject: repo:ORG/REPO:environment:<name>
+  # Approvals are not set in YAML. Enable Required reviewers on GitHub Environments
+  # named exactly: dev, staging, production (Settings → Environments).
   deploy:
     name: 'Deploy ${{ matrix.environment }}'
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [plan-deploy]
     runs-on: ubuntu-latest
-    environment: ${{ matrix.environment }}
+    environment:
+      name: ${{ matrix.environment }}
     strategy:
       fail-fast: true
       max-parallel: 1
