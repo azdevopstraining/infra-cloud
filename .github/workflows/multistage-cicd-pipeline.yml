@@ -58,7 +58,7 @@ jobs:
     name: 'Validate and what-if (dev)'
     needs: [lint-and-scan]
     runs-on: ubuntu-latest
-    environment: dev-preview
+    environment: dev
     steps:
     - name: Checkout
       uses: actions/checkout@v3
