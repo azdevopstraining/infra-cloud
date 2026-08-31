@@ -1,0 +1,196 @@
+name: 'Bicep CI/CD'
+
+## PRs and main only: Azure OIDC federated credentials cannot use branch wildcards.
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options: [dev, staging, production]
+
+env:
+  LOCATION: "westus"
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  lint-and-scan:
+    name: 'Lint and security scan'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Bicep Lint
+      uses: Azure/cli@v1
+      with:
+        inlineScript: az bicep build --file main.bicep
+
+    - name: Run Checkov action
+      id: checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        framework: bicep
+
+    - name: Upload SARIF file
+      if: success() || failure()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: results.sarif
+        category: checkov
+
+  # Validate + what-if against dev on every run (PR, push to main, manual).
+  # OIDC subject: repo:ORG/REPO:environment:dev
+  preview-dev:
+    name: 'Validate and what-if (dev)'
+    needs: [lint-and-scan]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: 'Az CLI login'
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Bicep Validate
+      uses: Azure/cli@v1
+      with:
+        inlineScript: |
+          az deployment sub validate \
+            --name validate-dev-${{ github.run_id }} \
+            --template-file main.bicep \
+            --parameters params/dev.bicepparam \
+            --location $LOCATION
+
+    - name: "What-If"
+      uses: Azure/cli@v1
+      with:
+        inlineScript: |
+          az deployment sub what-if \
+            --name whatif-dev-${{ github.run_id }} \
+            --template-file main.bicep \
+            --parameters params/dev.bicepparam \
+            --location $LOCATION > whatif
+
+    - name: Create String Output
+      id: whatif-string
+      run: |
+        WHATIF=$(cat whatif)
+
+        delimiter="$(openssl rand -hex 8)"
+        echo "summary<<${delimiter}" >> $GITHUB_OUTPUT
+        echo "## What-if output (dev)" >> $GITHUB_OUTPUT
+        echo "<details><summary>Click to expand</summary>" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo '```' >> $GITHUB_OUTPUT
+        echo "$WHATIF" >> $GITHUB_OUTPUT
+        echo '```' >> $GITHUB_OUTPUT
+        echo "</details>" >> $GITHUB_OUTPUT
+        echo "${delimiter}" >> $GITHUB_OUTPUT
+
+    - name: Publish Whatif to Task Summary
+      env:
+        SUMMARY: ${{ steps.whatif-string.outputs.summary }}
+      run: |
+        echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+
+    - name: Push Whatif Output to PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      env:
+        SUMMARY: "${{ steps.whatif-string.outputs.summary }}"
+      with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = `${process.env.SUMMARY}`;
+            github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+            })
+
+  # Always plan targets so this job is not skipped on PRs.
+  # PRs still do not deploy (see deploy job if).
+  plan-deploy:
+    name: 'Plan deploy targets'
+    needs: [lint-and-scan, preview-dev]
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+    - id: set-matrix
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        TARGET_ENV: ${{ github.event.inputs.environment }}
+      run: |
+        if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          PARAM="params/${TARGET_ENV}.bicepparam"
+          if [ "$TARGET_ENV" = "production" ]; then
+            PARAM="params/prod.bicepparam"
+          fi
+          echo "matrix={\"include\":[{\"environment\":\"${TARGET_ENV}\",\"params\":\"${PARAM}\"}]}" >> "$GITHUB_OUTPUT"
+        else
+          echo 'matrix={"include":[{"environment":"dev","params":"params/dev.bicepparam"},{"environment":"staging","params":"params/staging.bicepparam"},{"environment":"production","params":"params/prod.bicepparam"}]}' >> "$GITHUB_OUTPUT"
+        fi
+
+  # On merge to main: deploy dev, then staging, then production (one at a time).
+  # Manual run can target a single environment.
+  # OIDC subject: repo:ORG/REPO:environment:<name>
+  deploy:
+    name: 'Deploy ${{ matrix.environment }}'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [plan-deploy]
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.plan-deploy.outputs.matrix) }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: 'Az CLI login'
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: What-if (pre-deploy)
+      uses: Azure/cli@v1
+      with:
+        inlineScript: |
+          az deployment sub what-if \
+            --name whatif-${{ matrix.environment }}-${{ github.run_id }} \
+            --template-file main.bicep \
+            --parameters ${{ matrix.params }} \
+            --location $LOCATION
+
+    - name: Bicep Deployment
+      uses: Azure/cli@v1
+      with:
+        inlineScript: |
+          az deployment sub create \
+            --name deploy-${{ matrix.environment }}-${{ github.run_id }} \
+            --template-file main.bicep \
+            --parameters ${{ matrix.params }} \
+            --location $LOCATION
