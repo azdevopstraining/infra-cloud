@@ -1,6 +1,6 @@
 name: 'Bicep CI/CD'
 
-# PRs and main only: Azure OIDC federated credentials cannot use branch wildcards.
+## PRs and main only: Azure OIDC federated credentials cannot use branch wildcards.
 on:
   push:
     branches:
