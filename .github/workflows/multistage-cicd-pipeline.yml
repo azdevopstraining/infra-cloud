@@ -127,10 +127,10 @@ jobs:
                 body: body
             })
 
-  # Job-level if cannot use matrix, so choose targets here first.
+  # Always plan targets so this job is not skipped on PRs.
+  # PRs still do not deploy (see deploy job if).
   plan-deploy:
     name: 'Plan deploy targets'
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [lint-and-scan, preview-dev]
     runs-on: ubuntu-latest
     outputs:
@@ -156,6 +156,7 @@ jobs:
   # OIDC subject: repo:ORG/REPO:environment:<name>
   deploy:
     name: 'Deploy ${{ matrix.environment }}'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [plan-deploy]
     runs-on: ubuntu-latest
     environment: ${{ matrix.environment }}
