@@ -1,6 +1,7 @@
 name: 'Bicep CI/CD'
 
-## PRs and main only: Azure OIDC federated credentials cannot use branch wildcards.
+# PRs run lint, validate, what-if, and the deploy jobs — except az deployment create.
+# Merge (or push) to main and manual runs also apply the Bicep template.
 on:
   push:
     branches:
@@ -51,12 +52,12 @@ jobs:
         sarif_file: results.sarif
         category: checkov
 
-  # Validate + what-if against dev on every run (PR, push to main, manual).
+  # Validate + what-if against dev, then deploy (on merge to main or manual run).
   # OIDC subject: repo:ORG/REPO:environment:dev
   preview-dev:
     name: 'Validate and what-if (dev)'
     needs: [lint-and-scan]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     environment: dev
     steps:
     - name: Checkout
@@ -127,12 +128,11 @@ jobs:
                 body: body
             })
 
-  # Always plan targets so this job is not skipped on PRs.
-  # PRs still do not deploy (see deploy job if).
+  # Choose deploy targets (all envs on push to main; one env on manual run).
   plan-deploy:
     name: 'Plan deploy targets'
     needs: [lint-and-scan, preview-dev]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -158,9 +158,8 @@ jobs:
   # named exactly: dev, staging, production (Settings → Environments).
   deploy:
     name: 'Deploy ${{ matrix.environment }}'
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [plan-deploy]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     environment:
       name: ${{ matrix.environment }}
     strategy:
@@ -189,6 +188,7 @@ jobs:
             --location $LOCATION
 
     - name: Bicep Deployment
+      if: github.event_name != 'pull_request'
       uses: Azure/cli@v1
       with:
         inlineScript: |
