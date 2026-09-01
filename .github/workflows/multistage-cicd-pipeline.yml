@@ -29,7 +29,7 @@ permissions:
 jobs:
   lint-and-scan:
     name: 'Lint and security scan'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -57,7 +57,7 @@ jobs:
   preview-dev:
     name: 'Validate and what-if (dev)'
     needs: [lint-and-scan]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     environment: dev
     steps:
     - name: Checkout
@@ -132,7 +132,7 @@ jobs:
   plan-deploy:
     name: 'Plan deploy targets'
     needs: [lint-and-scan, preview-dev]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -159,7 +159,7 @@ jobs:
   deploy:
     name: 'Deploy ${{ matrix.environment }}'
     needs: [plan-deploy]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     environment:
       name: ${{ matrix.environment }}
     strategy:
