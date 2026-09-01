@@ -28,7 +28,7 @@ permissions:
 jobs:
   lint-and-scan:
     name: 'Lint and security scan'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ubuntu, azure]
     steps:
     - name: Checkout
       uses: actions/checkout@v3
