@@ -1,4 +1,4 @@
-# infra-cloud
+# Infra-Cloud
 
 ## Repository layout
 
