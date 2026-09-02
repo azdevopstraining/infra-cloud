@@ -200,7 +200,7 @@ The same workflow exists under `board-advisors` and `project-xyz`. Behavior is i
 |-------|---------|
 | `name: Bicep CI/CD` | Label in the Actions tab. |
 | `on.push` / `on.pull_request` to `main` | Run on PRs into `main` and on merges to `main`. OIDC federated credentials cannot use branch wildcards, so other branches are excluded on purpose. |
-| `on.workflow_dispatch` | **Run workflow** in the UI. You must pick `dev`, `staging`, or `production`. Only that environment deploys. |
+| `on.workflow_dispatch` | You click **Run workflow** yourself in GitHub. GitHub asks: deploy to **dev**, **staging**, or **production**? It then deploys **only that one**. |
 | `env.LOCATION: westus` | Region for the **subscription deployment record**, not the resource group. The group region comes from the `.bicepparam`. |
 | `permissions` | Least privilege for this workflow. |
 
@@ -263,10 +263,10 @@ No Azure. One step. It writes a **matrix** JSON that Job 4 reads.
 
 It always runs, including on PRs, so the job graph stays complete. Job 4 itself skips on PRs.
 
-| Event | Matrix |
-|-------|--------|
-| **Manual run** | One row: the environment you chose. `production` maps to `params/prod.bicepparam` (file name ≠ environment name). |
-| **PR or merge** | Three rows: `dev` → `dev.bicepparam`, `staging` → `staging.bicepparam`, `production` → `prod.bicepparam`. |
+| How you started it | What gets a deploy slot |
+|--------------------|-------------------------|
+| You clicked **Run workflow** and picked one env | Only that one. If you picked production, it uses `params/prod.bicepparam` (the file is named `prod`, the env is named `production`). |
+| You opened a PR or merged to `main` | All three: `dev`, `staging`, `production`. |
 
 Output: `matrix` on the job, consumed as `needs.plan-deploy.outputs.matrix`.
 
@@ -278,11 +278,15 @@ Output: `matrix` on the job, consumed as `needs.plan-deploy.outputs.matrix`.
 if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 ```
 
-| Trigger | Deploys? |
-|---------|----------|
-| Pull request | No |
-| Push / merge to `main` | Yes — all three environments, in order |
-| Manual run | Yes — only the environment you picked |
+Think of three doors into the same pipeline:
+
+| How it started | Does Azure get updated? | In plain words |
+|----------------|-------------------------|----------------|
+| Someone opened a **pull request** | No | “Show me the plan. Do not build anything yet.” |
+| Someone **merged to `main`** | Yes — **dev, then staging, then production** | “The change is approved. Roll it out everywhere, in order.” |
+| Someone clicked **Run workflow** (manual) | Yes — **only the env they chose in the dropdown** | “I only want to update staging today” (or only dev, or only production). |
+
+**Manual run example:** GitHub Actions → **Bicep CI/CD** → **Run workflow**. You select `staging` and click Run. The pipeline still checks the code and shows a what-if for dev. Then it **creates/updates Azure only for staging**. Dev and production are left alone in that run.
 
 `needs: [plan-deploy]`.  
 `environment: ${{ matrix.environment }}` — `dev`, then `staging`, then `production`. Each can have its own secrets and required reviewers (set in GitHub UI, not in this YAML).
@@ -306,11 +310,11 @@ Deployment names include `${{ github.run_id }}` so each run is unique in Azure h
 
 ### End-to-end
 
-| Path | What runs |
-|------|-----------|
-| **PR** | Lint + Checkov → validate/what-if on **dev** → plan matrix → **stop**. Reviewers see the plan. Azure is unchanged. |
-| **Merge to `main`** | Same checks → deploy **dev**, then **staging**, then **production**. Each waits for the previous. Approvals (if enabled) happen on the GitHub Environment. |
-| **Manual** | Same checks → deploy only the environment you selected. |
+| Path | What runs, in plain words |
+|------|---------------------------|
+| **PR** | Check the files. Show what *would* change in **dev**. **Stop.** Azure is not touched. |
+| **Merge to `main`** | Same checks, then actually create/update **dev**, wait, then **staging**, wait, then **production**. |
+| **You click Run workflow** | Same checks, then actually create/update **only** the environment you picked in the dropdown. |
 
 ### What this file does not do
 
