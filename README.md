@@ -1,57 +1,5 @@
 # infra-cloud
 
-**Azure infrastructure as code.** One template. Three environments. Git is the source of truth.
-
-```text
-Portal clicks  →  forgotten, unrepeatable, no review
-This repo      →  declared in Bicep, reviewed in PRs, deployed by pipeline
-```
-
-| Without this repo | With this repo |
-|-------------------|----------------|
-| Create a resource group in the portal | Bicep declares it |
-| Remember names and regions | `.bicepparam` stores them |
-| Repeat the same work for staging and prod | Same template, different param file |
-| Nobody knows what changed | Git history + GitHub Actions |
-
-Same pattern for every workload. Copy a project folder. Change the names. Deploy.
-
----
-
-## Why this design
-
-Infrastructure should be **boring to operate** and **obvious to read**.
-
-1. **Template never changes per environment.** `main.bicep` is identical for dev, staging, and production.
-2. **Values live in param files.** Name, region, and tags are data — not hardcoded logic.
-3. **Modules do one job.** The resource group module does not know about “dev” or “board-advisors”.
-4. **The pipeline is the only path to Azure.** Lint → what-if → deploy. No silent portal drift.
-
-That is the whole idea. Everything below is that idea, written down.
-
----
-
-## Architecture
-
-```mermaid
-flowchart LR
-  A["params/*.bicepparam"] --> B["main.bicep"]
-  B --> C["modules/resource-group.bicep"]
-  C --> D["Azure subscription"]
-  D --> E["Resource group"]
-```
-
-| Step | What happens |
-|------|----------------|
-| 1 | You pick an environment file (`dev`, `staging`, or `prod`). |
-| 2 | Azure CLI deploys `main.bicep` at **subscription** scope. |
-| 3 | `main.bicep` calls the resource group module and passes name, location, tags. |
-| 4 | Azure creates or updates the group. Run it again with the same values — nothing breaks. **Idempotent.** |
-
-The module returns `name`, `id`, and `location`. Later resources (storage, Key Vault, apps) attach to that group with `scope: resourceGroup(rg.outputs.name)`.
-
----
-
 ## Repository layout
 
 ```text
