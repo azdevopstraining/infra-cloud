@@ -186,7 +186,7 @@ flowchart TD
   J2 --> J3["Job 3: plan-deploy"]
   J3 --> D{"push or manual?"}
   D -->|PR| Stop["Stop — no Azure change"]
-  D -->|yes| J4["Job 4: deploy"]
+  D -->|yes| J4["Job 4: Plan-deploy"]
   J4 --> Dev["dev"]
   Dev --> Stg["staging"]
   Stg --> Prd["production"]
