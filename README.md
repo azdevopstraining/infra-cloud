@@ -301,47 +301,6 @@ Think of three doors into the same pipeline:
 | `fail-fast: true` | If staging fails, production does not start. |
 | `matrix` | One job instance per planned environment. |
 
-| Step | Purpose |
-|------|---------|
-| **Checkout** | Clone the code to deploy. |
-| **Az CLI login** | OIDC again. Subject includes this environment (`environment:staging`, etc.), so each env can use a different Azure identity if you configure it that way. |
-| **What-if (pre-deploy)** | Last look at planned changes for **this** environment, using that env’s param file. Still no apply. |
-| **Bicep Deployment** | `az deployment sub create` — creates or updates the resource group. Same template every time; only the param file changes. Idempotent: run again with the same values and Azure does nothing harmful. |
-
-Deployment names include `${{ github.run_id }}` so each run is unique in Azure history (`deploy-dev-123456789`).
-
-### End-to-end
-
-| Path | What runs, in plain words |
-|------|---------------------------|
-| **PR** | Check the files. Show what *would* change in **dev**. **Stop.** Azure is not touched. |
-| **Merge to `main`** | Same checks, then actually create/update **dev**, wait, then **staging**, wait, then **production**. |
-| **You click Run workflow** | Same checks, then actually create/update **only** the environment you picked in the dropdown. |
-
-### What this file does not do
-
-- It does not set required reviewers. That is **Settings → Environments** (`dev`, `staging`, `production` — names must match exactly).
-- It does not choose the resource group region. That is `location` in the `.bicepparam`.
-- GitHub only auto-starts workflows in the **repo-root** `.github/workflows/`. This file lives under `projects/<name>/.github/workflows/`.
-
----
-
-## Extend it
-
-### Add a resource inside the group
-
-```bicep
-module storage 'modules/storage.bicep' = {
-  name: 'storage-${environment}'
-  scope: resourceGroup(rg.outputs.name)
-  params: {
-    location: rg.outputs.location
-  }
-}
-```
-
-`scope` places the child in the group **and** waits until the group exists.
-
 ### Add a project
 
 1. Copy `projects/project-xyz/` to `projects/<new-name>/`.
