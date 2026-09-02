@@ -134,7 +134,7 @@ Output of `az bicep build`. ARM that Azure Resource Manager consumes. Source of 
 | **Module** | A `.bicep` file called by `main.bicep`. One job per file. |
 | **`.bicepparam`** | Values for one environment. Template stays the same. |
 | **What-if** | Dry run. Shows create / change / delete. Applies nothing. |
-| **OIDC** | GitHub logs into Azure with a federated identity. No password in the repo. |
+| **OIDC** | A short-lived “visitor pass.” GitHub proves *this pipeline run* is allowed to talk to Azure. No Azure password is saved in GitHub. |
 
 ---
 
@@ -208,14 +208,16 @@ The same workflow exists under `board-advisors` and `project-xyz`. Behavior is i
 
 | Permission | Why it is needed |
 |------------|------------------|
-| `id-token: write` | GitHub can mint an OIDC token so Azure login needs no stored password. |
+| `id-token: write` | Lets GitHub create a short-lived visitor pass (OIDC token) so the pipeline can log into Azure. No Azure password is stored in the repo. |
 | `contents: read` | Checkout the repo. |
 | `security-events: write` | Upload Checkov findings as SARIF. |
 | `pull-requests: write` | Post the what-if comment on the PR. |
 
-Secrets used later: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
+**OIDC in plain words:** Azure will not accept a saved password from this workflow. Instead, each run GitHub writes a temporary pass that says “this job is from *this* GitHub repo, *this* environment.” Azure already trusts that GitHub app. It checks the pass, lets the job in, then the pass expires. That is safer than keeping an Azure password in GitHub Secrets.
 
-OIDC credentials are bound to `main` (and PRs into it). No branch wildcards.
+The workflow still stores three IDs (who to log in as, not a password): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
+
+OIDC is allowed only for `main` and PRs into `main`. Other branches cannot use this login.
 
 GitHub Environments must be named exactly `dev`, `staging`, `production`. Turn on **required reviewers** in Settings → Environments. Approvals are not in the YAML.
 
