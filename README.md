@@ -28,13 +28,13 @@ projects/<name>/
 
 **One folder = one workload.** board-advisors and project-xyz do not share resource groups. Add `projects/another-app/` without touching the others.
 
-> GitHub Actions only auto-runs workflows from the **repo-root** `.github/workflows/`. Project-level YAML is the intended pipeline definition. If this stays a monorepo, add a root workflow that points at each project’s `main.bicep`.
+> GitHub Actions runs workflows from the **repo-root** `.github/workflows/`
 
 ---
 
-## What we deploy today
+## What we deploy:
 
-Each project creates **one resource group per environment**, all in `eastus`.
+Each project creates **one resource group per environment**, all in `westus`.
 
 | Project | Pattern | Dev | Staging | Production |
 |---------|---------|-----|---------|------------|
@@ -93,7 +93,7 @@ The template stays still. These files move.
 using '../main.bicep'
 
 param environment = 'dev'
-param location = 'eastus'
+param location = 'westus'
 param resourceGroupName = 'rg-project-dev'
 param resourceGroupTags = {
   environment: 'dev'
@@ -109,11 +109,11 @@ param resourceGroupTags = {
 
 Modules do **not** have their own param files. `main.bicep` forwards values down.
 
-**Two locations, different jobs**
+**One locations, different jobs**
 
 | Value | Meaning |
 |-------|---------|
-| `location` in the param file | Where the **resource group** is created (`eastus`) |
+| `location` in the param file | Where the **resource group** is created (`westus`) |
 | `--location` on `az deployment sub` | Where Azure stores the **deployment record** (`westus` in CI) |
 
 Change a group name or region in the param file. Do not edit the module for that.
@@ -167,7 +167,7 @@ az deployment sub create \
   --parameters params/dev.bicepparam
 ```
 
-Swap the param file for staging or production. For project-xyz, `cd projects/project-xyz` first.
+Swap the param file for staging or production and change the parameters accordingly based on the environment.
 
 ---
 
