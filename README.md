@@ -1,262 +1,198 @@
 # infra-cloud
 
-This repository is the **Infrastructure as Code (IaC)** home for Azure resources.
+**Azure infrastructure as code.** One template. Three environments. Git is the source of truth.
 
-Instead of creating resource groups (and later storage, networks, apps) by clicking in the Azure Portal, you describe them in **Bicep** files and let Azure create or update them. The same files can be deployed to **dev**, **staging**, and **production** by changing only a parameter file.
+```text
+Portal clicks  →  forgotten, unrepeatable, no review
+This repo      →  declared in Bicep, reviewed in PRs, deployed by pipeline
+```
 
-Think of it this way:
+| Without this repo | With this repo |
+|-------------------|----------------|
+| Create a resource group in the portal | Bicep declares it |
+| Remember names and regions | `.bicepparam` stores them |
+| Repeat the same work for staging and prod | Same template, different param file |
+| Nobody knows what changed | Git history + GitHub Actions |
 
-| Portal click | This repo |
-|--------------|-----------|
-| You create a resource group by hand | Bicep declares the group |
-| You remember the name and region | A `.bicepparam` file stores them |
-| You repeat the same clicks for staging and prod | You reuse the same template with a different param file |
-| Nobody knows what changed last week | Git history + GitHub Actions show every change |
-
-Remote: [azdevopstraining/infra-cloud](https://github.com/azdevopstraining/infra-cloud).
-
----
-
-## What this repo does today
-
-Right now each project deploys **one Azure resource group** per environment.
-
-| Project | Folder | Dev group | Staging group | Production group |
-|---------|--------|-----------|---------------|------------------|
-| board-advisors | `projects/board-advisors/` | `rg-bicep-github-actions-dev` | `rg-bicep-github-actions-staging` | `rg-bicep-github-actions-production` |
-| project-xyz | `projects/project-xyz/` | `rg-project-dev` | `rg-project-staging` | `rg-project-production` |
-
-All of those groups are created in **eastus** (set in the param files). Later you can add more modules (storage, Key Vault, and so on) under the same group without changing this overall pattern.
+Same pattern for every workload. Copy a project folder. Change the names. Deploy.
 
 ---
 
-## Why the repo is split by project
+## Why this design
 
-`projects/` holds one folder per application or workload.
+Infrastructure should be **boring to operate** and **obvious to read**.
 
-- **board-advisors** and **project-xyz** do not share a resource group.
-- Each project has its own `main.bicep`, param files, module, and pipeline.
-- You can add `projects/another-app/` later without mixing names or tags.
+1. **Template never changes per environment.** `main.bicep` is identical for dev, staging, and production.
+2. **Values live in param files.** Name, region, and tags are data — not hardcoded logic.
+3. **Modules do one job.** The resource group module does not know about “dev” or “board-advisors”.
+4. **The pipeline is the only path to Azure.** Lint → what-if → deploy. No silent portal drift.
 
-That keeps ownership clear: change board-advisors infrastructure in its folder; leave project-xyz alone.
+That is the whole idea. Everything below is that idea, written down.
 
 ---
 
-## Full folder map
+## Architecture
+
+```mermaid
+flowchart LR
+  A["params/*.bicepparam"] --> B["main.bicep"]
+  B --> C["modules/resource-group.bicep"]
+  C --> D["Azure subscription"]
+  D --> E["Resource group"]
+```
+
+| Step | What happens |
+|------|----------------|
+| 1 | You pick an environment file (`dev`, `staging`, or `prod`). |
+| 2 | Azure CLI deploys `main.bicep` at **subscription** scope. |
+| 3 | `main.bicep` calls the resource group module and passes name, location, tags. |
+| 4 | Azure creates or updates the group. Run it again with the same values — nothing breaks. **Idempotent.** |
+
+The module returns `name`, `id`, and `location`. Later resources (storage, Key Vault, apps) attach to that group with `scope: resourceGroup(rg.outputs.name)`.
+
+---
+
+## Repository layout
 
 ```text
 infra-cloud/
-├── README.md                          ← this file (repo overview)
+├── README.md
 └── projects/
-    ├── board-advisors/
-    │   ├── main.bicep                 ← entry point: calls modules
-    │   ├── main.json                  ← compiled ARM (from az bicep build)
-    │   ├── modules/
-    │   │   └── resource-group.bicep   ← creates the Azure resource group
-    │   ├── params/
-    │   │   ├── dev.bicepparam         ← values for the dev group
-    │   │   ├── staging.bicepparam     ← values for the staging group
-    │   │   └── prod.bicepparam        ← values for the production group
-    │   └── .github/workflows/
-    │       └── multistage-cicd-pipeline.yml
-    └── project-xyz/
-        ├── main.bicep
-        ├── main.json
-        ├── modules/
-        │   └── resource-group.bicep
-        ├── params/
-        │   ├── dev.bicepparam
-        │   ├── staging.bicepparam
-        │   └── prod.bicepparam
-        └── .github/workflows/
-            └── multistage-cicd-pipeline.yml
+    ├── board-advisors/          # one workload
+    └── project-xyz/             # another workload — same shape, different names
 ```
 
-Both projects follow the **same pattern**. Only the resource group names differ.
-
----
-
-## Important words (read this first)
-
-**Bicep**  
-A language from Microsoft for Azure resources. It is easier to read than raw ARM JSON. Azure still converts Bicep to ARM JSON before deploying.
-
-**ARM template (`main.json`)**  
-The compiled form of `main.bicep`. Created when you run `az bicep build --file main.bicep`. You edit `.bicep` files, not this JSON.
-
-**Subscription scope**  
-A resource group is an Azure subscription object, not something that lives *inside* another group. That is why `main.bicep` and `resource-group.bicep` start with:
-
-```bicep
-targetScope = 'subscription'
-```
-
-Deployments therefore use `az deployment sub ...` (subscription), not `az deployment group ...` (inside a group).
-
-**Module**  
-A separate `.bicep` file that `main.bicep` calls. One job per file (here: “create a resource group”). `main.bicep` is the orchestrator; modules do the work.
-
-**Parameter file (`.bicepparam`)**  
-A list of values for one environment. The template stays the same; only these values change.
-
-```bicep
-using '../main.bicep'          // “these values belong to main.bicep”
-
-param environment = 'dev'
-param location = 'eastus'
-param resourceGroupName = 'rg-project-dev'
-```
-
-Modules do **not** have their own param files. `main.bicep` reads the env file and **forwards** `name`, `location`, and `tags` into the module.
-
-**What-if**  
-A dry run. Azure tells you what it *would* create, change, or delete. Nothing is applied.
-
-**OIDC**  
-GitHub Actions logs into Azure with a federated identity. There is no long-lived password in the repo. The workflow uses three secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
-
----
-
-## How a deploy actually works
-
-One flow, every time:
+Each project is self-contained:
 
 ```text
-  params/dev.bicepparam
-           │
-           │  environment, location, resourceGroupName, resourceGroupTags
-           ▼
-       main.bicep
-           │
-           │  module rg 'modules/resource-group.bicep'
-           ▼
-  modules/resource-group.bicep
-           │
-           │  Microsoft.Resources/resourceGroups
-           ▼
-     Azure subscription
-           │
-           ▼
-  Resource group exists (or is updated)
+projects/<name>/
+├── main.bicep                   # orchestrator — the only file you deploy
+├── main.json                    # compiled ARM (generated, do not edit)
+├── modules/
+│   └── resource-group.bicep     # one job: create a resource group
+├── params/
+│   ├── dev.bicepparam
+│   ├── staging.bicepparam
+│   └── prod.bicepparam
+└── .github/workflows/
+    └── multistage-cicd-pipeline.yml
 ```
 
-1. You (or the pipeline) pick a param file, for example `params/dev.bicepparam`.
-2. Azure CLI runs a **subscription** deployment of `main.bicep` with those parameters.
-3. `main.bicep` calls the resource group module and passes name, location, and tags.
-4. The module creates or updates that group in Azure.
-5. The module returns `name`, `id`, and `location` so later modules can deploy *into* that group.
+**One folder = one workload.** board-advisors and project-xyz do not share resource groups. Add `projects/another-app/` without touching the others.
 
-If you deploy again with the same values, Azure sees no change and does nothing harmful. Bicep is **idempotent**: run it many times; you get the same result.
+> GitHub Actions only auto-runs workflows from the **repo-root** `.github/workflows/`. Project-level YAML is the intended pipeline definition. If this stays a monorepo, add a root workflow that points at each project’s `main.bicep`.
 
 ---
 
-## File-by-file: what each file is for
+## What we deploy today
 
-### `main.bicep` (the orchestrator)
+Each project creates **one resource group per environment**, all in `eastus`.
 
-This is the only file you point Azure CLI or the pipeline at.
+| Project | Pattern | Dev | Staging | Production |
+|---------|---------|-----|---------|------------|
+| **board-advisors** | `rg-bicep-github-actions-${env}` | `rg-bicep-github-actions-dev` | `rg-bicep-github-actions-staging` | `rg-bicep-github-actions-production` |
+| **project-xyz** | `rg-project-${env}` | `rg-project-dev` | `rg-project-staging` | `rg-project-production` |
 
-| Line / idea | Purpose |
-|-------------|---------|
-| `targetScope = 'subscription'` | Deploy at subscription level so a resource group can be created. |
-| `param environment` | Must be `dev`, `staging`, or `production`. |
-| `param location` | Region for the group. Default is the deployment location if a param file omits it. |
-| `param resourceGroupName` | The actual Azure name. Default is project-specific if the param file omits it. |
-| `param resourceGroupTags` | Tags on the group (`environment`, `source`). |
-| `module rg 'modules/resource-group.bicep'` | Calls the reusable module instead of declaring the group inline. |
+The pattern does not change when you add storage, networking, or apps. Those become more modules under the same group.
 
-`name: 'rg-${environment}'` on the module is the **nested deployment name** in Azure (a label for that module run). It is not the resource group name. The group name is `params.name` → `resourceGroupName`.
+---
 
-### `modules/resource-group.bicep` (the worker)
+## How the pieces fit
 
-This file only knows how to create a resource group. It does not know about “dev” or “board-advisors”.
+### `main.bicep` — orchestrator
 
-| Piece | Purpose |
-|-------|---------|
-| `param name` | Group name, from `main.bicep`. |
-| `param location` | Azure region. |
-| `param tags` | Optional tags (default empty object). |
-| `resource rg 'Microsoft.Resources/resourceGroups@2021-01-01'` | The real Azure resource. |
-| `output name / id / location` | Values the parent (or later modules) can use. |
+The file Azure CLI and the pipeline point at. It does not create the group itself. It **calls the module**.
 
-Why a module instead of putting the resource in `main.bicep`?
+| Parameter | Role |
+|-----------|------|
+| `environment` | `dev` \| `staging` \| `production` |
+| `location` | Region of the resource group |
+| `resourceGroupName` | Azure name of the group |
+| `resourceGroupTags` | Tags (`environment`, `source`) |
 
-- One file, one job — easier to read and reuse.
-- The same module can be called from another project’s `main.bicep`.
-- Later resources (storage, Key Vault) become more modules; `main.bicep` just lists them.
+```bicep
+module rg 'modules/resource-group.bicep' = {
+  name: 'rg-${environment}'          // nested deployment label — not the group name
+  params: {
+    name: resourceGroupName
+    location: location
+    tags: resourceGroupTags
+  }
+}
+```
 
-### `params/*.bicepparam` (environment values)
+`targetScope = 'subscription'` is required. A resource group lives on the subscription, not inside another group. Deploy with `az deployment sub`, not `az deployment group`.
 
-| File | When to use it |
-|------|----------------|
-| `params/dev.bicepparam` | Local tests and the pipeline’s preview + first deploy |
-| `params/staging.bicepparam` | Staging after dev |
-| `params/prod.bicepparam` | Production (file is named `prod`, environment value is `production`) |
+### `modules/resource-group.bicep` — worker
 
-Example (`projects/board-advisors/params/dev.bicepparam`):
+Reusable. Environment-agnostic. Three inputs, three outputs.
+
+| Inputs | Outputs |
+|--------|---------|
+| `name`, `location`, `tags` | `name`, `id`, `location` |
+
+Why a module, not an inline resource?
+
+- One file, one responsibility.
+- The same module can be referenced from any project’s `main.bicep`.
+- The next resource is another module. `main.bicep` stays a short list of calls.
+
+### `params/*.bicepparam` — environment data
+
+The template stays still. These files move.
 
 ```bicep
 using '../main.bicep'
 
 param environment = 'dev'
 param location = 'eastus'
-param resourceGroupName = 'rg-bicep-github-actions-dev'
+param resourceGroupName = 'rg-project-dev'
 param resourceGroupTags = {
   environment: 'dev'
   source: 'bicep-github-actions'
 }
 ```
 
-To rename a group or move it to another region, edit **this file**, not the module.
+| File | Environment value | Used for |
+|------|-------------------|----------|
+| `params/dev.bicepparam` | `dev` | Local work, PR preview, first deploy |
+| `params/staging.bicepparam` | `staging` | Staging after dev |
+| `params/prod.bicepparam` | `production` | Production (`prod` is the file name only) |
 
-**Two different “locations”**
+Modules do **not** have their own param files. `main.bicep` forwards values down.
 
-- `location` in the param file → where the **resource group** is created (`eastus`).
-- `--location westus` on `az deployment sub` → where Azure stores the **deployment record**. That is metadata, not the group’s region.
+**Two locations, different jobs**
+
+| Value | Meaning |
+|-------|---------|
+| `location` in the param file | Where the **resource group** is created (`eastus`) |
+| `--location` on `az deployment sub` | Where Azure stores the **deployment record** (`westus` in CI) |
+
+Change a group name or region in the param file. Do not edit the module for that.
 
 ### `main.json`
 
-Output of `az bicep build`. Azure Resource Manager understands this JSON. You do not edit it by hand. Safe to regenerate after you change Bicep. You can commit it or ignore it; the source of truth is `.bicep`.
-
-### `.github/workflows/multistage-cicd-pipeline.yml`
-
-The GitHub Actions workflow that lints, previews, and deploys. Each project has a copy. See [CI/CD](#cicd-the-pipeline-explained) below.
-
-> **Monorepo note:** GitHub only auto-runs workflows in the **repository root** folder `.github/workflows/`. These YAML files currently live under each project. If this stays one git repo, copy or move the workflow to the repo root (or add a root workflow that calls them) so Actions actually runs. If each project later becomes its own repo, the current path is correct.
+Output of `az bicep build`. ARM that Azure Resource Manager consumes. Source of truth is always `.bicep`.
 
 ---
 
-## The two projects
+## Glossary
 
-### board-advisors
-
-| Item | Value |
-|------|--------|
-| Folder | `projects/board-advisors/` |
-| Default name pattern | `rg-bicep-github-actions-${environment}` |
-| Dev | `rg-bicep-github-actions-dev` |
-| Staging | `rg-bicep-github-actions-staging` |
-| Production | `rg-bicep-github-actions-production` |
-| Region | eastus |
-
-### project-xyz
-
-| Item | Value |
-|------|--------|
-| Folder | `projects/project-xyz/` |
-| Default name pattern | `rg-project-${environment}` |
-| Dev | `rg-project-dev` |
-| Staging | `rg-project-staging` |
-| Production | `rg-project-production` |
-| Region | eastus |
-
-Same code shape, different names so the two workloads do not collide in Azure.
+| Term | Meaning |
+|------|---------|
+| **Bicep** | Microsoft’s language for Azure resources. Compiles to ARM JSON. |
+| **ARM (`main.json`)** | Compiled template. Do not edit by hand. |
+| **Subscription scope** | Required to create a resource group. `targetScope = 'subscription'`. |
+| **Module** | A `.bicep` file called by `main.bicep`. One job per file. |
+| **`.bicepparam`** | Values for one environment. Template stays the same. |
+| **What-if** | Dry run. Shows create / change / delete. Applies nothing. |
+| **OIDC** | GitHub logs into Azure with a federated identity. No password in the repo. |
 
 ---
 
-## Deploy from your laptop
+## Deploy locally
 
-You need Azure CLI with the Bicep extension and rights to create resource groups on the subscription.
+Requires Azure CLI (Bicep extension) and rights to create resource groups.
 
 ```bash
 az login
@@ -264,25 +200,18 @@ az account set --subscription <subscription-id>
 cd projects/board-advisors
 ```
 
-**Compile (no Azure changes):**
-
 ```bash
+# Compile — no Azure changes
 az bicep build --file main.bicep
-```
 
-**Preview:**
-
-```bash
+# Preview
 az deployment sub what-if \
   --name whatif-dev \
   --location westus \
   --template-file main.bicep \
   --parameters params/dev.bicepparam
-```
 
-**Create or update:**
-
-```bash
+# Apply
 az deployment sub create \
   --name deploy-dev \
   --location westus \
@@ -290,78 +219,57 @@ az deployment sub create \
   --parameters params/dev.bicepparam
 ```
 
-Use `params/staging.bicepparam` or `params/prod.bicepparam` for the other environments. For project-xyz, `cd projects/project-xyz` first.
+Swap the param file for staging or production. For project-xyz, `cd projects/project-xyz` first.
 
 ---
 
-## CI/CD: the pipeline explained
+## Pipeline
 
-File: `projects/<name>/.github/workflows/multistage-cicd-pipeline.yml`.
+Defined in `projects/<name>/.github/workflows/multistage-cicd-pipeline.yml`.
 
-### When it runs
+```mermaid
+flowchart TD
+  A["PR / merge / manual"] --> B["Lint + Checkov"]
+  B --> C["Validate + what-if on dev"]
+  C --> D["Plan targets"]
+  D --> E{"PR?"}
+  E -->|yes| F["Stop — no deploy"]
+  E -->|merge or manual| G["Deploy"]
+  G --> H["dev"]
+  H --> I["staging"]
+  I --> J["production"]
+```
 
-| Trigger | What happens |
-|---------|----------------|
-| Pull request to `main` | Lint, scan, and what-if against **dev**. No deploy. |
-| Push / merge to `main` | Same preview, then deploy **dev → staging → production** one at a time. |
-| Manual **Run workflow** | You pick one environment and only that one deploys. |
+| Trigger | Result |
+|---------|--------|
+| Pull request to `main` | Lint, scan, what-if on **dev**. No deploy. |
+| Merge to `main` | Same preview, then **dev → staging → production**, one at a time. |
+| Manual run | One environment only. |
 
-OIDC federated credentials are tied to specific branches, so the workflow is limited to `main` and PRs into `main` (no branch wildcards).
+OIDC credentials are bound to `main` (and PRs into it). No branch wildcards.
 
-### Job 1 — Lint and security scan
+| Job | Purpose |
+|-----|---------|
+| **Lint and scan** | `az bicep build`, then Checkov. SARIF uploaded to the PR. Self-hosted runner: `self-hosted, linux, ubuntu, azure`. |
+| **Preview (dev)** | OIDC login → `validate` → `what-if`. Report goes to the job summary and the PR comment. |
+| **Plan targets** | Merge = all three environments. Manual = the one you picked. `production` uses `params/prod.bicepparam`. |
+| **Deploy** | `fail-fast`, `max-parallel: 1`. Staging fails → production does not start. What-if, then `create`. |
 
-- `az bicep build --file main.bicep` — template must compile.
-- [Checkov](https://www.checkov.io/) — static checks for risky Bicep.
-- Uploads a SARIF report to GitHub so findings show on the PR.
+GitHub Environments must be named exactly `dev`, `staging`, `production`. Turn on **required reviewers** in Settings → Environments. Approvals are not in the YAML.
 
-This job uses a **self-hosted** runner labeled `self-hosted, linux, ubuntu, azure`.
-
-### Job 2 — Preview (dev)
-
-Runs after lint. Logs in with OIDC (`environment: dev`).
-
-1. `az deployment sub validate` — Azure accepts the template and params.
-2. `az deployment sub what-if` — planned changes, written to a file.
-3. That report is added to the job summary and, on a PR, posted as a comment.
-
-This is the “show me what would happen” step before anyone merges.
-
-### Job 3 — Plan deploy targets
-
-Builds a **matrix** of environments:
-
-- Merge to `main` → all three (`dev`, `staging`, `production`).
-- Manual run → only the environment you selected.  
-  `production` uses `params/prod.bicepparam` (file name ≠ environment name).
-
-PRs still run this job so the graph stays complete, but the next job skips deploy on PRs.
-
-### Job 4 — Deploy
-
-Runs only on `push` to `main` or `workflow_dispatch`.
-
-- `max-parallel: 1` and `fail-fast: true` → **dev, then staging, then production**. If staging fails, production does not start.
-- Each matrix row uses a GitHub Environment with the same name (`dev`, `staging`, `production`) so you can add **required reviewers** in GitHub (Settings → Environments). Approvals are not in the YAML; you turn them on in the UI.
-- Each environment logs in again (OIDC subject includes that environment name).
-- What-if runs once more, then `az deployment sub create`.
-
-### Secrets the pipeline expects
-
-Set these on the GitHub repo or on each Environment:
-
-| Secret | Meaning |
+| Secret | Purpose |
 |--------|---------|
-| `AZURE_CLIENT_ID` | App registration (service principal) client ID |
-| `AZURE_TENANT_ID` | Microsoft Entra tenant ID |
+| `AZURE_CLIENT_ID` | App registration client ID |
+| `AZURE_TENANT_ID` | Microsoft Entra tenant |
 | `AZURE_SUBSCRIPTION_ID` | Target subscription |
 
-The workflow also needs `id-token: write` so GitHub can mint the OIDC token.
+Workflow permission: `id-token: write` (OIDC token).
 
 ---
 
-## Adding more Azure resources later
+## Extend it
 
-The resource group module already outputs `name`, `id`, and `location`. A child module must run **inside** that group, so you set `scope`:
+### Add a resource inside the group
 
 ```bicep
 module storage 'modules/storage.bicep' = {
@@ -373,43 +281,40 @@ module storage 'modules/storage.bicep' = {
 }
 ```
 
-`scope: resourceGroup(rg.outputs.name)` does two things:
+`scope` places the child in the group **and** waits until the group exists.
 
-1. Deploys the child at **resource group** scope (normal for storage, apps, and so on).
-2. Waits until the group module has finished, so the group exists first.
+### Add a project
 
----
-
-## Adding a new project
-
-1. Copy `projects/project-xyz/` (or board-advisors) to `projects/<new-name>/`.
-2. Change `resourceGroupName` in each `params/*.bicepparam` so names stay unique.
-3. Update the default in `main.bicep` if you want a new naming pattern.
-4. Point the pipeline (or a root workflow) at that folder’s `main.bicep`.
+1. Copy `projects/project-xyz/` to `projects/<new-name>/`.
+2. Give each `params/*.bicepparam` unique `resourceGroupName` values.
+3. Update the default name in `main.bicep` if you want a new pattern.
+4. Point CI at that folder’s `main.bicep`.
 
 Do not reuse another project’s group names.
 
 ---
 
-## Quick troubleshooting
+## Troubleshooting
 
-| Symptom | Likely cause |
-|---------|----------------|
-| `az deployment group ...` fails | Resource groups need **subscription** deploy (`az deployment sub`). |
-| Wrong group name in Azure | Check the env `.bicepparam`, not the module. |
-| Group in the “wrong” region | Param `location` is the group region. `--location` on the CLI is only the deployment record. |
-| GitHub Actions never runs | Workflow YAML is under `projects/.../.github/`, not the repo root. |
-| Login fails in Actions | Missing OIDC secrets, or GitHub Environment name is not exactly `dev` / `staging` / `production`. |
-| Production did not deploy | Staging failed (`fail-fast`), or this was a PR (deploy is skipped), or a reviewer has not approved. |
+| Symptom | Cause |
+|---------|--------|
+| `az deployment group` fails | Resource groups need `az deployment sub`. |
+| Wrong group name in Azure | Edit the env `.bicepparam`, not the module. |
+| Group in the “wrong” region | Param `location` is the group. CLI `--location` is only the deployment record. |
+| Actions never runs | Workflow is under `projects/.../.github/`, not the repo root. |
+| Login fails in Actions | Missing OIDC secrets, or Environment name is not `dev` / `staging` / `production`. |
+| Production skipped | Staging failed, this was a PR, or an approver has not signed off. |
 
 ---
 
-## Mental model (one sentence each)
+## Mental model
 
-- **This repo** = source of truth for Azure infrastructure.
-- **`projects/<name>/`** = one workload’s infrastructure.
-- **`main.bicep`** = “what to deploy and in what order.”
-- **`modules/resource-group.bicep`** = “how to create a resource group.”
-- **`params/*.bicepparam`** = “values for this environment.”
-- **The pipeline** = lint → preview on PRs → deploy in order on merge.
-- **Azure** = creates or updates the real resources to match the files.
+| Piece | One line |
+|-------|----------|
+| **This repo** | Source of truth for Azure infrastructure |
+| **`projects/<name>/`** | One workload |
+| **`main.bicep`** | What to deploy, and in what order |
+| **`modules/*.bicep`** | How to create one resource type |
+| **`params/*.bicepparam`** | Values for one environment |
+| **Pipeline** | Lint → preview on PRs → staged deploy on merge |
+| **Azure** | Matches the files. Nothing else. |
