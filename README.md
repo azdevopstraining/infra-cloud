@@ -173,45 +173,150 @@ Swap the param file for staging or production and change the parameters accordin
 
 ## Pipeline
 
-Defined in `projects/<name>/.github/workflows/multistage-cicd-pipeline.yml`.
+File: `projects/<name>/.github/workflows/multistage-cicd-pipeline.yml`.
+
+This workflow takes Bicep from the repo to Azure. It does three things, in order: **check the template**, **show what would change**, then **deploy** — and only after a merge or a manual run.
+
+There are no formal YAML “stages.” GitHub Actions uses **jobs**. This file treats jobs as stages: lint → preview → plan → deploy.
 
 ```mermaid
 flowchart TD
-  A["PR / merge / manual"] --> B["Lint + Checkov"]
-  B --> C["Validate + what-if on dev"]
-  C --> D["Plan targets"]
-  D --> E{"PR?"}
-  E -->|yes| F["Stop — no deploy"]
-  E -->|merge or manual| G["Deploy"]
-  G --> H["dev"]
-  H --> I["staging"]
-  I --> J["production"]
+  T["Trigger: PR / merge to main / manual"] --> J1["Job 1: lint-and-scan"]
+  J1 --> J2["Job 2: preview-dev"]
+  J2 --> J3["Job 3: plan-deploy"]
+  J3 --> D{"push or manual?"}
+  D -->|PR| Stop["Stop — no Azure change"]
+  D -->|yes| J4["Job 4: deploy"]
+  J4 --> Dev["dev"]
+  Dev --> Stg["staging"]
+  Stg --> Prd["production"]
 ```
 
-| Trigger | Result |
-|---------|--------|
-| Pull request to `main` | Lint, scan, what-if on **dev**. No deploy. |
-| Merge to `main` | Same preview, then **dev → staging → production**, one at a time. |
-| Manual run | One environment only. |
+The same workflow exists under `board-advisors` and `project-xyz`. Behavior is identical; only the project folder (and that project’s param files) differs.
+
+### Header — when it runs, and with what rights
+
+| Block | Purpose |
+|-------|---------|
+| `name: Bicep CI/CD` | Label in the Actions tab. |
+| `on.push` / `on.pull_request` to `main` | Run on PRs into `main` and on merges to `main`. OIDC federated credentials cannot use branch wildcards, so other branches are excluded on purpose. |
+| `on.workflow_dispatch` | **Run workflow** in the UI. You must pick `dev`, `staging`, or `production`. Only that environment deploys. |
+| `env.LOCATION: westus` | Region for the **subscription deployment record**, not the resource group. The group region comes from the `.bicepparam`. |
+| `permissions` | Least privilege for this workflow. |
+
+**Permissions**
+
+| Permission | Why it is needed |
+|------------|------------------|
+| `id-token: write` | GitHub can mint an OIDC token so Azure login needs no stored password. |
+| `contents: read` | Checkout the repo. |
+| `security-events: write` | Upload Checkov findings as SARIF. |
+| `pull-requests: write` | Post the what-if comment on the PR. |
+
+Secrets used later: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
 
 OIDC credentials are bound to `main` (and PRs into it). No branch wildcards.
 
-| Job | Purpose |
-|-----|---------|
-| **Lint and scan** | `az bicep build`, then Checkov. SARIF uploaded to the PR. Self-hosted runner: `self-hosted, linux, ubuntu, azure`. |
-| **Preview (dev)** | OIDC login → `validate` → `what-if`. Report goes to the job summary and the PR comment. |
-| **Plan targets** | Merge = all three environments. Manual = the one you picked. `production` uses `params/prod.bicepparam`. |
-| **Deploy** | `fail-fast`, `max-parallel: 1`. Staging fails → production does not start. What-if, then `create`. |
-
 GitHub Environments must be named exactly `dev`, `staging`, `production`. Turn on **required reviewers** in Settings → Environments. Approvals are not in the YAML.
 
-| Secret | Purpose |
-|--------|---------|
-| `AZURE_CLIENT_ID` | App registration client ID |
-| `AZURE_TENANT_ID` | Microsoft Entra tenant |
-| `AZURE_SUBSCRIPTION_ID` | Target subscription |
+### Job 1 — `lint-and-scan`
 
-Workflow permission: `id-token: write` (OIDC token).
+**Stage: quality gate. No Azure login. Nothing is created.**
+
+Runs first. If this fails, preview and deploy do not start.
+
+`runs-on: [self-hosted, linux, ubuntu, azure]` — uses the self-hosted runner, not GitHub-hosted.
+
+| Step | Purpose |
+|------|---------|
+| **Checkout** | Clone the commit that triggered the run so later steps see the Bicep files. |
+| **Bicep Lint** | `az bicep build --file main.bicep`. If the template does not compile, the pipeline stops. Cheaper than failing in Azure. |
+| **Run Checkov** | Static security scan of Bicep (misconfigurations, weak defaults). Writes `results.sarif`. |
+| **Upload SARIF** | Sends that report to GitHub Code Scanning. `if: success() \|\| failure()` means the upload still runs if Checkov finds issues, so findings stay visible on the PR. |
+
+### Job 2 — `preview-dev`
+
+**Stage: dry run against dev. Azure is contacted. Nothing is applied.**
+
+`needs: [lint-and-scan]` — waits for lint.  
+`environment: dev` — uses the GitHub Environment named `dev` (secrets + optional reviewers). OIDC subject is `repo:ORG/REPO:environment:dev`.  
+`runs-on: ubuntu-latest` — GitHub-hosted runner.
+
+This job runs on **every** trigger (PR, merge, manual) so reviewers always see a plan.
+
+| Step | Purpose |
+|------|---------|
+| **Checkout** | Fresh clone on this runner. |
+| **Az CLI login** | OIDC login with the three Azure secrets. No client secret in the repo. |
+| **Bicep Validate** | `az deployment sub validate` with `params/dev.bicepparam`. Azure checks template + params (schema, names, types). Still no create/update. |
+| **What-If** | `az deployment sub what-if` — the real preview: create / change / delete. Output is saved to a file named `whatif`. |
+| **Create String Output** | Wraps that text as Markdown (collapsible `<details>`) and stores it as a step output. The random delimiter avoids breaking GitHub’s output format if the what-if text is large. |
+| **Publish Whatif to Task Summary** | Puts the same report on the Actions **job summary** so you can read it without opening logs. |
+| **Push Whatif Output to PR** | Only when `github.event_name == 'pull_request'`. Posts the report as a PR comment so reviewers see impact without leaving the PR. |
+
+### Job 3 — `plan-deploy`
+
+**Stage: decide which environments the deploy job will run.**
+
+`needs: [lint-and-scan, preview-dev]`.  
+No Azure. One step. It writes a **matrix** JSON that Job 4 reads.
+
+It always runs, including on PRs, so the job graph stays complete. Job 4 itself skips on PRs.
+
+| Event | Matrix |
+|-------|--------|
+| **Manual run** | One row: the environment you chose. `production` maps to `params/prod.bicepparam` (file name ≠ environment name). |
+| **PR or merge** | Three rows: `dev` → `dev.bicepparam`, `staging` → `staging.bicepparam`, `production` → `prod.bicepparam`. |
+
+Output: `matrix` on the job, consumed as `needs.plan-deploy.outputs.matrix`.
+
+### Job 4 — `deploy`
+
+**Stage: apply infrastructure. This is the only job that changes Azure.**
+
+```yaml
+if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+```
+
+| Trigger | Deploys? |
+|---------|----------|
+| Pull request | No |
+| Push / merge to `main` | Yes — all three environments, in order |
+| Manual run | Yes — only the environment you picked |
+
+`needs: [plan-deploy]`.  
+`environment: ${{ matrix.environment }}` — `dev`, then `staging`, then `production`. Each can have its own secrets and required reviewers (set in GitHub UI, not in this YAML).
+
+**Strategy**
+
+| Setting | Meaning |
+|---------|---------|
+| `max-parallel: 1` | One environment at a time. |
+| `fail-fast: true` | If staging fails, production does not start. |
+| `matrix` | One job instance per planned environment. |
+
+| Step | Purpose |
+|------|---------|
+| **Checkout** | Clone the code to deploy. |
+| **Az CLI login** | OIDC again. Subject includes this environment (`environment:staging`, etc.), so each env can use a different Azure identity if you configure it that way. |
+| **What-if (pre-deploy)** | Last look at planned changes for **this** environment, using that env’s param file. Still no apply. |
+| **Bicep Deployment** | `az deployment sub create` — creates or updates the resource group. Same template every time; only the param file changes. Idempotent: run again with the same values and Azure does nothing harmful. |
+
+Deployment names include `${{ github.run_id }}` so each run is unique in Azure history (`deploy-dev-123456789`).
+
+### End-to-end
+
+| Path | What runs |
+|------|-----------|
+| **PR** | Lint + Checkov → validate/what-if on **dev** → plan matrix → **stop**. Reviewers see the plan. Azure is unchanged. |
+| **Merge to `main`** | Same checks → deploy **dev**, then **staging**, then **production**. Each waits for the previous. Approvals (if enabled) happen on the GitHub Environment. |
+| **Manual** | Same checks → deploy only the environment you selected. |
+
+### What this file does not do
+
+- It does not set required reviewers. That is **Settings → Environments** (`dev`, `staging`, `production` — names must match exactly).
+- It does not choose the resource group region. That is `location` in the `.bicepparam`.
+- GitHub only auto-starts workflows in the **repo-root** `.github/workflows/`. This file lives under `projects/<name>/.github/workflows/`.
 
 ---
 
