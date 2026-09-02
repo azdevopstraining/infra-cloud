@@ -239,30 +239,3 @@ module storage 'modules/storage.bicep' = {
 4. Point CI at that folder’s `main.bicep`.
 
 Do not reuse another project’s group names.
-
----
-
-## Troubleshooting
-
-| Symptom | Cause |
-|---------|--------|
-| `az deployment group` fails | Resource groups need `az deployment sub`. |
-| Wrong group name in Azure | Edit the env `.bicepparam`, not the module. |
-| Group in the “wrong” region | Param `location` is the group. CLI `--location` is only the deployment record. |
-| Actions never runs | Workflow is under `projects/.../.github/`, not the repo root. |
-| Login fails in Actions | Missing OIDC secrets, or Environment name is not `dev` / `staging` / `production`. |
-| Production skipped | Staging failed, this was a PR, or an approver has not signed off. |
-
----
-
-## Mental model
-
-| Piece | One line |
-|-------|----------|
-| **This repo** | Source of truth for Azure infrastructure |
-| **`projects/<name>/`** | One workload |
-| **`main.bicep`** | What to deploy, and in what order |
-| **`modules/*.bicep`** | How to create one resource type |
-| **`params/*.bicepparam`** | Values for one environment |
-| **Pipeline** | Lint → preview on PRs → staged deploy on merge |
-| **Azure** | Matches the files. Nothing else. |
